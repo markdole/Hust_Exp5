@@ -1,0 +1,134 @@
+#!/usr/bin/env python
+import rospy
+import smach
+import smach_ros
+from ma_smach.srv import Empty
+from turtlesim.srv import Spawn,SpawnRequest,TeleportAbsolute,TeleportAbsoluteRequest
+from turtlesim.msg import Pose
+from turtle_actionlib.msg import ShapeAction,ShapeGoal
+
+tur_x = [0.0]
+tur_y = [0.0]
+
+def cond_cb(userdata, msg):
+	mark_x=msg.x
+	mark_y=msg.y
+	#print x
+	sub = rospy.Subscriber('turtle1/pose', Pose, get_t_pose)
+	tx=tur_x[0]
+	ty=tur_y[0]
+	distance=(mark_x - tx)*(mark_x - tx)+(mark_y - ty)*(mark_y - ty)
+	if distance <9:
+		print ('they got too close and the distance is ',distance)
+		return False
+	else:
+		return True
+	
+def get_t_pose(msg):
+	x = msg.x
+	y = msg.y
+	tur_x.append(x)
+	tur_x.pop(0)
+	tur_y.append(y)
+	tur_y.pop(0)
+	
+def clear_cb(userdata,msg):
+	mark_x=msg.x
+	mark_y=msg.y
+	sub = rospy.Subscriber('turtle1/pose', Pose, get_t_pose)
+	tx=tur_x[0]
+	ty=tur_y[0]
+	distance=(mark_x - tx)*(mark_x - tx)+(mark_y - ty)*(mark_y - ty)
+	if distance >16:
+		print ('Road is clear and the distance is',distance)
+		return False
+	else:
+		return True
+	
+def main():
+	rospy.init_node('ma_smach')
+	sm_root = smach.StateMachine(['succeeded','aborted','preempted'])
+
+	with sm_root:
+		smach.StateMachine.add('RESET',
+			smach_ros.ServiceState('reset',Empty), transitions= {'succeeded':'SPAWN'})
+			
+		smach.StateMachine.add('SPAWN',
+			smach_ros.ServiceState('spawn', Spawn, 
+			request = SpawnRequest(1.0, 1.0, 0.0, 'mark')),
+			transitions= {'succeeded':'TURTLE1','aborted':'aborted','preempted':'preempted'})
+		#key point turtlesim xytheta is float type
+		
+		smach.StateMachine.add('TURTLE1',
+			smach_ros.ServiceState('turtle1/teleport_absolute', TeleportAbsolute, 
+			request =TeleportAbsoluteRequest(5.0, 1.0, 0.0)), 
+			transitions= {
+			        'succeeded':'CON',
+			        'aborted':'aborted',
+			        'preempted':'preempted'})
+			
+		 # Create the sub SMACH state machine
+		sm_con=smach.Concurrence( outcomes= ['suc','abo','pre'], default_outcome='abo',
+								outcome_map={
+									'suc':{'TURTLE1_SHAPE':'succeeded', 'DRAW_S':'succeed'},
+									'pre':{'DRAW_S':'preempt','TURTLE1_SHAPE':'preempted'}})
+								
+		smach.StateMachine.add('CON',sm_con,
+		        transitions={'abo':'CON','suc':'succeeded','pre':'preempted'})
+		
+		with sm_con:
+		    smach.Concurrence.add('TURTLE1_SHAPE',smach_ros.SimpleActionState('turtle_shape', ShapeAction, goal=ShapeGoal(11,4.0) ) )
+		    
+		    sm_draw = smach.StateMachine(['succeed','abort','preempt'])
+		    
+		    with sm_draw:
+		    
+		        smach.StateMachine.add('MONITOR_CLEAR',
+		                smach_ros.MonitorState('mark/pose',Pose, clear_cb),
+		                transitions={'valid':'MONITOR_CLEAR',
+		                        'invalid':'TELE',
+		                        'preempted':'preempt'})
+		        
+		        smach.StateMachine.add('TELE',
+		                smach_ros.ServiceState('mark/teleport_absolute',
+		                TeleportAbsolute,request = TeleportAbsoluteRequest(5.0, 5.0, 0.0)),
+		                transitions= {
+		                        'succeeded':'MARK_SHAPE',
+		                        'aborted':'abort',
+		                        'preempted':'preempt'})
+		        
+		        ma_con= smach.Concurrence(
+		                outcomes=  ['succeeded','aborted','preempted','interrupted'],
+		                default_outcome='aborted',
+		                outcome_map={
+		                        'succeeded':{'MONITOR':'valid', 'DRAW':'succeeded'},
+		                        'preempted':{'MONITOR':'invalid','DRAW':'preempted'},
+		                        'interrupted':{'MONITOR':'invalid'}},
+		                child_termination_cb = lambda state_outcomes:True )
+		        
+		        smach.StateMachine.add('MARK_SHAPE',ma_con,
+		                transitions={
+		                        'interrupted':'MONITOR_CLEAR',
+		                        'aborted':'abort',
+		                        'preempted':'preempt',
+		                        'succeeded':'succeed'} )
+		        
+		        with ma_con:
+		        
+		            smach.Concurrence.add('DRAW',
+		                    smach_ros.SimpleActionState('mark_shape',ShapeAction,goal=ShapeGoal(6, 3.0)))
+		            smach.Concurrence.add('MONITOR',
+		                    smach_ros.MonitorState("mark/pose", Pose, cond_cb))
+		    
+		    smach.Concurrence.add('DRAW_S',sm_draw)
+                
+                
+				
+	sis = smach_ros.IntrospectionServer('ma_smach', sm_root ,'/SM_ROOT')
+	sis.start()
+	outcome = sm_root.execute()
+	rospy.spin()
+	sis.stop()
+
+if __name__ == '__main__':
+	main()
